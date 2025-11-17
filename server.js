@@ -1,20 +1,11 @@
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const multer = require('multer');
-const csv = require('csv-parser');
-const fs = require('fs');
-const cron = require('node-cron');
 require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// Configure multer for file uploads
-const upload = multer({ dest: 'uploads/' });
 
 // Database configuration for both local and production
 const pool = new Pool({
@@ -28,11 +19,42 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// Import middleware and services
-const { authMiddleware, requireRole, JWT_SECRET } = require('./middleware/auth');
-const EmailService = require('./services/emailService');
+// Simple JWT configuration (no external files needed)
+const JWT_SECRET = process.env.JWT_SECRET || 'hilina_foods_secret_2025';
 
-// ... rest of your code ...
+// Simple auth middleware (no external files needed)
+const authMiddleware = async (req, res, next) => {
+    try {
+        const token = req.header('Authorization')?.replace('Bearer ', '');
+        
+        if (!token) {
+            return res.status(401).json({ error: 'No token, authorization denied' });
+        }
+
+        const jwt = require('jsonwebtoken');
+        const decoded = jwt.verify(token, JWT_SECRET);
+        
+        // For now, just set the user from the token
+        req.user = {
+            id: decoded.userId,
+            email: decoded.email,
+            role: decoded.role || 'viewer'
+        };
+        
+        next();
+    } catch (error) {
+        res.status(401).json({ error: 'Token is not valid' });
+    }
+};
+
+const requireRole = (roles) => {
+    return (req, res, next) => {
+        if (!roles.includes(req.user.role)) {
+            return res.status(403).json({ error: 'Access denied. Insufficient permissions.' });
+        }
+        next();
+    };
+};
 
 // Test database connection
 app.get('/api/test-db', async (req, res) => {
@@ -91,6 +113,17 @@ app.get('/api/init-db', async (req, res) => {
                 unit VARCHAR(50),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                password VARCHAR(255) NOT NULL,
+                name VARCHAR(255) NOT NULL,
+                role VARCHAR(50) DEFAULT 'viewer',
+                is_active BOOLEAN DEFAULT true,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_login TIMESTAMP
+            );
         `);
 
         // Insert initial data
@@ -120,6 +153,24 @@ app.get('/api/init-db', async (req, res) => {
             (1, 'Net Margin %', 17, 23, '%'),
             (1, 'YTD Remittance', 328650, 328650, 'EUR')
             ON CONFLICT DO NOTHING;
+
+            -- Insert default admin user (password: admin123)
+            INSERT INTO users (email, password, name, role) 
+            VALUES (
+                'admin@hilinafoods.com', 
+                '$2a$10$8K1p/a0dRL1SzdiKJ.2.duZUMTp7pW7.OZ5B.8b.OdOMo3/.e.YsK', 
+                'System Administrator', 
+                'admin'
+            ) ON CONFLICT (email) DO NOTHING;
+
+            -- Insert finance user (password: finance123)
+            INSERT INTO users (email, password, name, role) 
+            VALUES (
+                'finance@hilinafoods.com', 
+                '$2a$10$8K1p/a0dRL1SzdiKJ.2.duZUMTp7pW7.OZ5B.8b.OdOMo3/.e.YsK', 
+                'Finance Manager', 
+                'finance'
+            ) ON CONFLICT (email) DO NOTHING;
         `);
 
         res.json({ message: 'Database initialized successfully!' });
@@ -241,39 +292,6 @@ app.post('/api/financials', async (req, res) => {
 });
 
 // Auth routes
-app.post('/api/auth/register', async (req, res) => {
-    try {
-        const { email, password, name, role = 'viewer' } = req.body;
-        
-        // Check if user exists
-        const userExists = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
-        if (userExists.rows.length > 0) {
-            return res.status(400).json({ error: 'User already exists' });
-        }
-
-        // Hash password
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(password, salt);
-
-        // Create user
-        const result = await pool.query(
-            'INSERT INTO users (email, password, name, role) VALUES ($1, $2, $3, $4) RETURNING id, email, name, role',
-            [email, hashedPassword, name, role]
-        );
-
-        // Generate token
-        const token = jwt.sign({ userId: result.rows[0].id }, JWT_SECRET, { expiresIn: '7d' });
-
-        res.json({
-            message: 'User registered successfully',
-            token,
-            user: result.rows[0]
-        });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
@@ -291,6 +309,7 @@ app.post('/api/auth/login', async (req, res) => {
         const user = result.rows[0];
 
         // Check password
+        const bcrypt = require('bcryptjs');
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
             return res.status(400).json({ error: 'Invalid credentials' });
@@ -300,7 +319,12 @@ app.post('/api/auth/login', async (req, res) => {
         await pool.query('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = $1', [user.id]);
 
         // Generate token
-        const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' });
+        const jwt = require('jsonwebtoken');
+        const token = jwt.sign({ 
+            userId: user.id,
+            email: user.email,
+            role: user.role 
+        }, JWT_SECRET, { expiresIn: '7d' });
 
         res.json({
             message: 'Login successful',
@@ -321,195 +345,6 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
     res.json({ user: req.user });
 });
 
-// Protected routes example
-app.get('/api/admin/users', authMiddleware, requireRole(['admin']), async (req, res) => {
-    try {
-        const result = await pool.query(
-            'SELECT id, email, name, role, is_active, created_at, last_login FROM users ORDER BY created_at DESC'
-        );
-        res.json(result.rows);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// CSV Import
-app.post('/api/import/financial-data', authMiddleware, requireRole(['admin', 'finance']), upload.single('file'), async (req, res) => {
-    try {
-        if (!req.file) {
-            return res.status(400).json({ error: 'No file uploaded' });
-        }
-
-        const results = [];
-        const errors = [];
-
-        // Parse CSV file
-        fs.createReadStream(req.file.path)
-            .pipe(csv())
-            .on('data', (data) => {
-                // Validate and transform CSV data
-                const transformed = transformFinancialData(data);
-                if (transformed.valid) {
-                    results.push(transformed.data);
-                } else {
-                    errors.push(transformed.error);
-                }
-            })
-            .on('end', async () => {
-                try {
-                    // Import valid records to database
-                    const importResults = await importFinancialData(results);
-                    
-                    // Clean up uploaded file
-                    fs.unlinkSync(req.file.path);
-
-                    res.json({
-                        message: 'Data import completed',
-                        summary: {
-                            totalRecords: results.length + errors.length,
-                            successful: importResults.successful,
-                            failed: importResults.failed,
-                            errors: errors
-                        },
-                        details: importResults.details
-                    });
-                } catch (error) {
-                    res.status(500).json({ error: error.message });
-                }
-            });
-
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-function transformFinancialData(data) {
-    try {
-        // Transform CSV data to match database structure
-        return {
-            valid: true,
-            data: {
-                period_date: data.period_date || data.date,
-                product_name: data.product_name || data.product,
-                sales_volume: parseFloat(data.sales_volume || data.sales),
-                production_volume: parseFloat(data.production_volume || data.production),
-                turnover_eur: parseFloat(data.turnover_eur || data.turnover),
-                rmpm_cost: parseFloat(data.rmpm_cost || data.rmpm),
-                operating_cost: parseFloat(data.operating_cost || data.operating),
-                net_profit: parseFloat(data.net_profit || data.profit),
-                net_margin: parseFloat(data.net_margin || (data.net_profit / data.turnover_eur))
-            }
-        };
-    } catch (error) {
-        return {
-            valid: false,
-            error: `Invalid data: ${error.message}`
-        };
-    }
-}
-
-async function importFinancialData(records) {
-    const results = {
-        successful: 0,
-        failed: 0,
-        details: []
-    };
-
-    for (const record of records) {
-        try {
-            // Similar to your existing financial data insertion logic
-            const fiscalYear = getFiscalYear(record.period_date);
-            const periodResult = await pool.query(
-                'INSERT INTO periods (period_date, period_type, fiscal_year) VALUES ($1, $2, $3) ON CONFLICT (period_date) DO UPDATE SET period_type = $2 RETURNING id',
-                [record.period_date, 'Monthly', fiscalYear]
-            );
-
-            const productResult = await pool.query(
-                'SELECT id FROM products WHERE name = $1',
-                [record.product_name]
-            );
-
-            if (productResult.rows.length === 0) {
-                throw new Error(`Invalid product: ${record.product_name}`);
-            }
-
-            await pool.query(
-                `INSERT INTO financial_data 
-                 (period_id, product_id, sales_volume, production_volume, turnover_eur, rmpm_cost, operating_cost, net_profit, net_margin) 
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-                [
-                    periodResult.rows[0].id,
-                    productResult.rows[0].id,
-                    record.sales_volume,
-                    record.production_volume,
-                    record.turnover_eur,
-                    record.rmpm_cost,
-                    record.operating_cost,
-                    record.net_profit,
-                    record.net_margin
-                ]
-            );
-
-            results.successful++;
-            results.details.push({ record, status: 'success' });
-        } catch (error) {
-            results.failed++;
-            results.details.push({ record, status: 'failed', error: error.message });
-        }
-    }
-
-    return results;
-}
-
-// Analytics endpoints
-app.get('/api/analytics/forecast', authMiddleware, async (req, res) => {
-    try {
-        const { product, periods = 6 } = req.query;
-        
-        const historicalData = await pool.query(`
-            SELECT 
-                p.period_date,
-                fd.sales_volume,
-                fd.production_volume,
-                fd.turnover_eur
-            FROM financial_data fd
-            JOIN periods p ON fd.period_id = p.id
-            WHERE fd.product_id = (SELECT id FROM products WHERE name = $1)
-            ORDER BY p.period_date DESC
-            LIMIT 12
-        `, [product]);
-
-        // Simple linear regression forecast
-        const forecast = generateForecast(historicalData.rows, parseInt(periods));
-        
-        res.json(forecast);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-function generateForecast(historicalData, periods) {
-    // Simple moving average forecast
-    const salesData = historicalData.map(d => d.sales_volume).reverse();
-    const forecast = [];
-    
-    for (let i = 0; i < periods; i++) {
-        const lastValues = salesData.slice(-3); // Last 3 periods
-        const average = lastValues.reduce((a, b) => a + b, 0) / lastValues.length;
-        forecast.push({
-            period: i + 1,
-            forecast_sales: Math.round(average * 1.05), // 5% growth assumption
-            confidence: 0.85 - (i * 0.1) // Decreasing confidence for further periods
-        });
-    }
-    
-    return {
-        historical: historicalData,
-        forecast: forecast,
-        generated_at: new Date().toISOString()
-    };
-}
-
 // Helper function to determine fiscal year
 function getFiscalYear(dateString) {
     const date = new Date(dateString);
@@ -524,21 +359,10 @@ function getFiscalYear(dateString) {
     }
 }
 
-// Schedule KPI alerts every Monday at 9 AM
-cron.schedule('0 9 * * 1', () => {
-    console.log('Sending weekly KPI alerts...');
-    EmailService.sendKPINotification();
-});
-
-// Schedule monthly reports on 1st of every month at 10 AM
-cron.schedule('0 10 1 * *', () => {
-    console.log('Sending monthly reports...');
-    EmailService.sendMonthlyReport();
-});
-
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
     console.log(`🎯 Hilina Foods Server running on port ${PORT}`);
     console.log(`📊 Test database: http://localhost:${PORT}/api/test-db`);
     console.log(`🗃️ Initialize DB: http://localhost:${PORT}/api/init-db`);
+    console.log(`🔐 Login endpoint: http://localhost:${PORT}/api/auth/login`);
 });
