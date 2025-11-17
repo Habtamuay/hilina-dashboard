@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: hilina-dashboard
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        value: hilina_foods_super_secure_jwt_secret_2025

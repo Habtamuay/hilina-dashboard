@@ -535,3 +535,14 @@ function generateForecast(historicalData, periods) {
         generated_at: new Date().toISOString()
     };
 }
+// Database configuration for both local and production
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL || {
+    host: 'localhost',
+    port: 5432,
+    database: 'hilina_reports', 
+    user: 'postgres',
+    password: '1234',
+  },
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+});
