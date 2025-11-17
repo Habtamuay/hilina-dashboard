@@ -1,20 +1,36 @@
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const multer = require('multer');
+const csv = require('csv-parser');
+const fs = require('fs');
+const cron = require('node-cron');
 require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Database configuration
+// Configure multer for file uploads
+const upload = multer({ dest: 'uploads/' });
+
+// Database configuration for both local and production - ONLY ONE DECLARATION
 const pool = new Pool({
+  connectionString: process.env.DATABASE_URL || {
     host: 'localhost',
     port: 5432,
-    database: 'hilina_reports',
+    database: 'hilina_reports', 
     user: 'postgres',
-    password: '1234', // Replace with your PostgreSQL password
+    password: '1234',
+  },
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
+
+// Import middleware and services
+const { authMiddleware, requireRole, JWT_SECRET } = require('./middleware/auth');
+const EmailService = require('./services/emailService');
 
 // Test database connection
 app.get('/api/test-db', async (req, res) => {
@@ -222,30 +238,6 @@ app.post('/api/financials', async (req, res) => {
     }
 });
 
-// Helper function to determine fiscal year
-function getFiscalYear(dateString) {
-    const date = new Date(dateString);
-    const year = date.getFullYear();
-    const month = date.getMonth() + 1;
-    
-    // Fiscal year starts in July (month 7)
-    if (month >= 7) {
-        return `${year}-${(year + 1).toString().slice(2)}`;
-    } else {
-        return `${year - 1}-${year.toString().slice(2)}`;
-    }
-}
-
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-    console.log(`🎯 Hilina Foods Server running on port ${PORT}`);
-    console.log(`📊 Test database: http://localhost:${PORT}/api/test-db`);
-    console.log(`🗃️ Initialize DB: http://localhost:${PORT}/api/init-db`);
-});
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const { authMiddleware, requireRole, JWT_SECRET } = require('./middleware/auth');
-
 // Auth routes
 app.post('/api/auth/register', async (req, res) => {
     try {
@@ -339,13 +331,7 @@ app.get('/api/admin/users', authMiddleware, requireRole(['admin']), async (req, 
     }
 });
 
-const multer = require('multer');
-const csv = require('csv-parser');
-const fs = require('fs');
-
-// Configure multer for file uploads
-const upload = multer({ dest: 'uploads/' });
-
+// CSV Import
 app.post('/api/import/financial-data', authMiddleware, requireRole(['admin', 'finance']), upload.single('file'), async (req, res) => {
     try {
         if (!req.file) {
@@ -472,22 +458,8 @@ async function importFinancialData(records) {
 
     return results;
 }
-const cron = require('node-cron');
-const EmailService = require('./services/emailService');
 
-// Schedule KPI alerts every Monday at 9 AM
-cron.schedule('0 9 * * 1', () => {
-    console.log('Sending weekly KPI alerts...');
-    EmailService.sendKPINotification();
-});
-
-// Schedule monthly reports on 1st of every month at 10 AM
-cron.schedule('0 10 1 * *', () => {
-    console.log('Sending monthly reports...');
-    EmailService.sendMonthlyReport();
-});
-
-// Advanced analytics endpoints
+// Analytics endpoints
 app.get('/api/analytics/forecast', authMiddleware, async (req, res) => {
     try {
         const { product, periods = 6 } = req.query;
@@ -535,14 +507,36 @@ function generateForecast(historicalData, periods) {
         generated_at: new Date().toISOString()
     };
 }
-// Database configuration for both local and production
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || {
-    host: 'localhost',
-    port: 5432,
-    database: 'hilina_reports', 
-    user: 'postgres',
-    password: '1234',
-  },
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+
+// Helper function to determine fiscal year
+function getFiscalYear(dateString) {
+    const date = new Date(dateString);
+    const year = date.getFullYear();
+    const month = date.getMonth() + 1;
+    
+    // Fiscal year starts in July (month 7)
+    if (month >= 7) {
+        return `${year}-${(year + 1).toString().slice(2)}`;
+    } else {
+        return `${year - 1}-${year.toString().slice(2)}`;
+    }
+}
+
+// Schedule KPI alerts every Monday at 9 AM
+cron.schedule('0 9 * * 1', () => {
+    console.log('Sending weekly KPI alerts...');
+    EmailService.sendKPINotification();
+});
+
+// Schedule monthly reports on 1st of every month at 10 AM
+cron.schedule('0 10 1 * *', () => {
+    console.log('Sending monthly reports...');
+    EmailService.sendMonthlyReport();
+});
+
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+    console.log(`🎯 Hilina Foods Server running on port ${PORT}`);
+    console.log(`📊 Test database: http://localhost:${PORT}/api/test-db`);
+    console.log(`🗃️ Initialize DB: http://localhost:${PORT}/api/init-db`);
 });
