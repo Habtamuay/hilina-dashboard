@@ -16,7 +16,7 @@ app.use(express.json());
 // Configure multer for file uploads
 const upload = multer({ dest: 'uploads/' });
 
-// Database configuration for both local and production - ONLY ONE DECLARATION
+// Database configuration for both local and production
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || {
     host: 'localhost',
@@ -31,6 +31,8 @@ const pool = new Pool({
 // Import middleware and services
 const { authMiddleware, requireRole, JWT_SECRET } = require('./middleware/auth');
 const EmailService = require('./services/emailService');
+
+// ... rest of your code ...
 
 // Test database connection
 app.get('/api/test-db', async (req, res) => {
